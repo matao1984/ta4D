@@ -95,7 +95,7 @@ class ta4D:
         # Update calibration dictionary
         HT = self.metadata.get('HT', 'default')
         CL = self.metadata.get('Camera length', 'default')
-        self.calibration[HT][CL]['Diffraction shift'] = (x_factor, x_offset), (y_factor, y_offset)
+        self.calibration.setdefault(HT, {}).setdefault(CL, {})['Diffraction shift'] = (x_factor, x_offset), (y_factor, y_offset)
 
         # Save calibration
         if save_calibration is not False:
@@ -137,7 +137,7 @@ class ta4D:
         # Update calibration dictionary
         HT = self.metadata.get('HT', 'default')
         CL = self.metadata.get('Camera length', 'default')
-        self.calibration[HT][CL]['Beam tilt'] = (x_factor, x_offset), (y_factor, y_offset)
+        self.calibration.setdefault(HT, {}).setdefault(CL, {})['Beam tilt'] = (x_factor, x_offset), (y_factor, y_offset)
 
         # Save calibration
         if save_calibration is not False:
@@ -172,14 +172,17 @@ class ta4D:
 
         return shiftx, shifty
 
-    def tilt_azimuth(self, tilt_strength: float, n_tilt: int, correct_shift: bool = True, acquire_flucam: bool = False, *args, **kwargs):
+    def tilt_azimuth(self, tilt_strength: float, n_tilt: int, correct_shift: bool = True, acquire_internal: bool = False, camera: CameraType = CameraType.FLUCAM, acquire_external: bool = True, *args, **kwargs):
         azimuth_angle = np.arange(0, 2*np.pi, 2*np.pi/n_tilt)
         tilt_x = np.cos(azimuth_angle) * tilt_strength
         tilt_y = np.sin(azimuth_angle) * tilt_strength
         # Store the original beam tilt and df shift
         original_beam_tilt = self.microscope.optics.deflectors.beam_tilt
         original_df_shift = self.microscope.optics.deflectors.image_tilt
+        # Prepare save file name
+        save_file = kwargs.pop('save_file', None)
         # Tilt with df shift for acquisition
+        single_patterns = []
         for i in range(n_tilt):
             tilt = tilt_x[i], tilt_y[i]
             self.microscope.optics.deflectors.beam_tilt = original_beam_tilt + tilt
@@ -187,28 +190,32 @@ class ta4D:
                 shift = self.correct_beam_tilt_with_shift(tilt)
                 self.microscope.optics.deflectors.image_tilt = original_df_shift + shift
             
-            if acquire_flucam:
-                save_file = kwargs.pop('save_file', None)
-                flucam_file = f'{save_file}_tilt_{i+1}_flucam.tiff' if save_file is not None else None
-                self.acquire_img(flucam_file, *args, title=f'ta4D tilt {i+1}', **kwargs)
-
-            print(f'TEM is ready to take ta4D scan: {i+1} of {n_tilt}')
-            input('Press any key to proceed to the next scan when finished...')
+            if acquire_internal:
+                acquire_external = False
+                img_file = f'{save_file}_tilt_{i+1}_{camera}.tiff' if save_file is not None else None
+                print(f'Saving internal ta4D tilt {i+1} image to {img_file}')
+                img = self.acquire_img(save_file=img_file, camera_detector=camera, *args, title=f'ta4D tilt {i+1}', **kwargs)
+                single_patterns.append(img)
+            
+            if acquire_external:
+                print(f'TEM is ready to take ta4D scan: {i+1} of {n_tilt}')
+                input('Press any key to proceed to the next scan when finished...')
 
         # Restore the original tilt and shift
         self.microscope.optics.deflectors.beam_tilt = original_beam_tilt 
         self.microscope.optics.deflectors.image_tilt = original_df_shift 
         print('ta4D scan completed!')
         
+        return single_patterns
+        
 
 
-    def acquire_ta4D(self, tilt_ang: float, n_tilt: int, correct_shift: bool = True, acquire_flucam: bool = False, *args, **kwargs):
+    def acquire_ta4D_scan(self, tilt_ang: float, n_tilt: int, correct_shift: bool = True, *args, **kwargs):
         '''High-level function to acquire ta4D datasets. 
         tilt_ang: Targeted tilt in mrad or px. If angular_calibration is provided in metadata, will tilt to the angle based on that.
         n_tilt: Number of tilt angles to acquire.
-        correct_shift: Whether to apply diffraction shift correction during acquisition. Usually this should be True. Turn it off for debugging.
-        acquire_flucam: Whether to acquire Flucam images during the tilt series. Turn it on for debugging.'''
-        angle_cal = self.metadata.get('angular_calibration', 1.0) # mrad/px
+        correct_shift: Whether to apply diffraction shift correction during acquisition. Usually this should be True. Turn it off for debugging.'''
+        angle_cal = self.metadata.get('Angular calibration', 1.0) # mrad/px
         px_to_tilt = tilt_ang / angle_cal
         HT = self.metadata.get('HT', 'default')
         CL = self.metadata.get('Camera length', 'default')
@@ -229,7 +236,42 @@ class ta4D:
         # Take scans
         print(f'Acquiring ta4D with {tilt_ang} mrad of beam tilt, {n_tilt} scans.')
         with blanker_context(self.microscope.optics.blanker):
-            self.tilt_azimuth(tilt_strength, n_tilt, correct_shift, acquire_flucam, *args, **kwargs)
+            self.tilt_azimuth(tilt_strength, n_tilt, correct_shift, acquire_external=True, *args, **kwargs)
+
+    def acquire_single_taed(self, tilt_ang: float, n_tilt: int, correct_shift: bool = True, acquire_internal: bool = True, camera: CameraType = CameraType.BM_CETA, acquire_external: bool = False, *args, **kwargs):
+        '''High-level function to acquire a single tilt-averaged electron diffraction using an internal or external detector. 
+        tilt_ang: Targeted tilt in mrad or px. If angular_calibration is provided in metadata, will tilt to the angle based on that.
+        n_tilt: Number of tilt angles to acquire.
+        correct_shift: Whether to apply diffraction shift correction during acquisition. Usually this should be True. Turn it off for debugging.
+        acquire_internal: Whether to acquire using an internal camera. Use this whenever possible to gain maximum speed.
+        camera: CameraType enum for internal camera selection.
+        acquire_external: Whether to acquire using an external detector. Use this when internal detector is not available. The acquisition will be manual.
+        reconstruct: Whether to reconstruct the tilt-averaged electron diffraction after acquisition.
+        *args, **kwargs: Additional arguments passed into acquire_img function for internal acquisition.'''
+        angle_cal = self.metadata.get('Angular calibration', 1.0) # mrad/px
+        px_to_tilt = tilt_ang / angle_cal
+        HT = self.metadata.get('HT', 'default')
+        CL = self.metadata.get('Camera length', 'default')
+        calibration = self.calibration.get(HT, {}).get(CL, {})
+        if 'Beam tilt' not in calibration or 'Diffraction shift' not in calibration:
+            # Run calibration with default strength
+            print('Beam tilt and/or diffraction shift calibration not found for current HT and Camera length. Running calibration with default strengths.')
+            print('Calibrating diffraction shift with 0.03...')
+            self.calibrate_df_shift(0.03, None)
+            print('Calibrating beam tilt with 0.03...')
+            self.calibrate_beam_tilt(0.03, None)
+            calibration = self.calibration.get(HT, {}).get(CL, {})
+
+        tilt_factor_offset = calibration['Beam tilt']
+        shift_factor_offset = calibration['Diffraction shift']
+
+        tilt_strength = px_to_tilt / tilt_factor_offset[0][0] 
+        # Take tilt series
+        print(f'Acquiring a single tilt-averaged electron diffraction pattern with {tilt_ang} mrad of beam tilt, {n_tilt} tilts.')
+        with blanker_context(self.microscope.optics.blanker):
+            self.single_taed = self.tilt_azimuth(tilt_strength, n_tilt, correct_shift, acquire_internal=acquire_internal, camera=camera, acquire_external=acquire_external, *args, **kwargs)
+
+        return self.single_taed
 
 
     
