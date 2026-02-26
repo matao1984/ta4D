@@ -69,11 +69,9 @@ class ta4D:
         ref_file = f'{save_file}_shift_ref.tiff' if save_file is not None else None
         # Take reference
         original_ref = self.acquire_img(ref_file, *args, title='Reference', **kwargs)
-        # Make shift list, 0, 1 are +-x, 2, 3 are +-y
+        # Make shift list of (x, 0), (0, y)
         shift_list = [original_df_shift + (shift_strength, 0), 
-                    original_df_shift + (-shift_strength, 0), 
-                    original_df_shift + (0, shift_strength), 
-                    original_df_shift + (0, -shift_strength)]
+                    original_df_shift + (0, shift_strength)]
         shift_factor_offset = []
         for shift in shift_list:
             shift_file =  f'{save_file}_shift_{shift}.tiff' if save_file is not None else None
@@ -87,10 +85,10 @@ class ta4D:
             shift_factor_offset.append((shift_factor, offset))
         self.microscope.optics.deflectors.image_tilt = original_df_shift
 
-        x_factor = (shift_factor_offset[0][0] + shift_factor_offset[1][0]) / 2
-        x_offset = (shift_factor_offset[0][1] + shift_factor_offset[1][1] - np.pi) / 2
-        y_factor = (shift_factor_offset[2][0] + shift_factor_offset[3][0]) / 2
-        y_offset = (shift_factor_offset[2][1] + shift_factor_offset[3][1] - np.pi) / 2
+        x_factor = shift_factor_offset[0][0] 
+        x_offset = shift_factor_offset[0][1]
+        y_factor = shift_factor_offset[1][0] 
+        y_offset = shift_factor_offset[1][1]
 
         # Update calibration dictionary
         HT = self.metadata.get('HT', 'default')
@@ -113,9 +111,7 @@ class ta4D:
         ref_file = f'{save_file}_tilt_ref.tiff' if save_file is not None else None
         original_ref = self.acquire_img(ref_file, *args, title='Reference', **kwargs)
         tilt_list = [original_beam_tilt + (tilt_strength, 0), 
-                    original_beam_tilt + (-tilt_strength, 0), 
-                    original_beam_tilt + (0, tilt_strength), 
-                    original_beam_tilt + (0, -tilt_strength)]
+                    original_beam_tilt + (0, tilt_strength)]
         tilt_factor_offset = []
         for tilt in tilt_list:
             tilt_file = f'{save_file}_tilt_{tilt}.tiff' if save_file is not None else None
@@ -129,10 +125,10 @@ class ta4D:
             tilt_factor_offset.append((tilt_factor, offset))
         self.microscope.optics.deflectors.beam_tilt = original_beam_tilt
 
-        x_factor = (tilt_factor_offset[0][0] + tilt_factor_offset[1][0]) / 2
-        x_offset = (tilt_factor_offset[0][1] + tilt_factor_offset[1][1] - np.pi) / 2
-        y_factor = (tilt_factor_offset[2][0] + tilt_factor_offset[3][0]) / 2
-        y_offset = (tilt_factor_offset[2][1] + tilt_factor_offset[3][1] - np.pi) / 2
+        x_factor = tilt_factor_offset[0][0] 
+        x_offset = tilt_factor_offset[0][1]
+        y_factor = tilt_factor_offset[1][0] 
+        y_offset = tilt_factor_offset[1][1]
 
         # Update calibration dictionary
         HT = self.metadata.get('HT', 'default')
@@ -164,11 +160,11 @@ class ta4D:
         tilt_offset = tilt_factor_offset[0][1]
         x = x_tilt * math.cos(tilt_offset) - y_tilt * math.sin(tilt_offset)
         y = x_tilt * math.sin(tilt_offset) + y_tilt * math.cos(tilt_offset)
-        # Calculate beam shift needed
+        # Calculate df shift needed
         shift_offset = -shift_factor_offset[0][1]
         x_shift = x * math.cos(shift_offset) - y * math.sin(shift_offset)
         y_shift = x * math.sin(shift_offset) + y * math.cos(shift_offset)
-        shiftx, shifty = x_shift / shift_factor_offset[0][0], y_shift / shift_factor_offset[1][0]
+        shiftx, shifty = -x_shift / shift_factor_offset[0][0], -y_shift / shift_factor_offset[1][0]
 
         return shiftx, shifty
 
