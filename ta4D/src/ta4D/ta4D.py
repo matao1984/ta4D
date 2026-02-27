@@ -64,7 +64,7 @@ class ta4D:
 
         return img
 
-    def calibrate_df_shift(self, shift_strength: float, save_file: str | None, *args, save_calibration: bool | str = False, **kwargs):
+    def calibrate_df_shift(self, shift_strength: float, save_file: str | None, *args, save_calibration: bool | str = False, normalization: str | None = None, **kwargs):
         original_df_shift = self.microscope.optics.deflectors.image_tilt
         ref_file = f'{save_file}_shift_ref.tiff' if save_file is not None else None
         # Take reference
@@ -78,7 +78,7 @@ class ta4D:
             self.microscope.optics.deflectors.image_tilt = shift
             title = f'Diffraction shift: {shift}'
             img = self.acquire_img(shift_file, *args, title=title, **kwargs)
-            shift, _, _ = phase_cross_correlation(original_ref.data, img.data, normalization=None)
+            shift, _, _ = phase_cross_correlation(original_ref.data, img.data, normalization=normalization)
             y, x = -shift
             shift_factor = (x ** 2 + y ** 2) ** 0.5 / abs(shift_strength)
             offset = math.atan2(y, x) # In rad
@@ -93,7 +93,8 @@ class ta4D:
         # Update calibration dictionary
         HT = self.metadata.get('HT', 'default')
         CL = self.metadata.get('Camera length', 'default')
-        self.calibration.setdefault(HT, {}).setdefault(CL, {})['Diffraction shift'] = (x_factor, x_offset), (y_factor, y_offset)
+        probe_mode = self.metadata.get('Probe mode', 'default')
+        self.calibration.setdefault(HT, {}).setdefault(probe_mode, {}).setdefault(CL, {})['Diffraction shift'] = (x_factor, x_offset), (y_factor, y_offset)
 
         # Save calibration
         if save_calibration is not False:
@@ -102,11 +103,12 @@ class ta4D:
                 pickle.dump(self.calibration, f)
             print(f'Calibration saved to {os.path.abspath(save_path)}')
 
+        print(f'Calibrated diffraction shift strength: x = {x_factor:.4f}, y = {y_factor:.4f} px/mrad\nCalibrated diffraction shift offset: x = {x_offset:.4f}, y = {y_offset:.4f} rad\nThe angle between x and y is {(y_offset - x_offset) * 180 / np.pi:.4f} deg.')
         return (x_factor, x_offset), (y_factor, y_offset)
             
 
 
-    def calibrate_beam_tilt(self, tilt_strength: float, save_file: str | None, save_calibration: bool | str = False, *args, **kwargs):
+    def calibrate_beam_tilt(self, tilt_strength: float, save_file: str | None, save_calibration: bool | str = False, *args, normalization: str | None = None, **kwargs):
         original_beam_tilt = self.microscope.optics.deflectors.beam_tilt
         ref_file = f'{save_file}_tilt_ref.tiff' if save_file is not None else None
         original_ref = self.acquire_img(ref_file, *args, title='Reference', **kwargs)
@@ -118,7 +120,7 @@ class ta4D:
             self.microscope.optics.deflectors.beam_tilt = tilt
             title = f'Beam tilt: {tilt}'
             img = self.acquire_img(tilt_file, *args, title=title, **kwargs)
-            shift, _, _ = phase_cross_correlation(original_ref.data, img.data, normalization=None)
+            shift, _, _ = phase_cross_correlation(original_ref.data, img.data, normalization=normalization)
             y, x = -shift
             tilt_factor = (x ** 2 + y ** 2) ** 0.5 / abs(tilt_strength)
             offset = math.atan2(y, x) # In rad
@@ -133,7 +135,8 @@ class ta4D:
         # Update calibration dictionary
         HT = self.metadata.get('HT', 'default')
         CL = self.metadata.get('Camera length', 'default')
-        self.calibration.setdefault(HT, {}).setdefault(CL, {})['Beam tilt'] = (x_factor, x_offset), (y_factor, y_offset)
+        probe_mode = self.metadata.get('Probe mode', 'default')
+        self.calibration.setdefault(HT, {}).setdefault(probe_mode, {}).setdefault(CL, {})['Beam tilt'] = (x_factor, x_offset), (y_factor, y_offset)
 
         # Save calibration
         if save_calibration is not False:
@@ -141,7 +144,8 @@ class ta4D:
             with open(save_path, 'wb') as f:
                 pickle.dump(self.calibration, f)
             print(f'Calibration saved to {os.path.abspath(save_path)}')
-
+        
+        print(f'Calibrated beam tilt strength: x = {x_factor:.4f}, y = {y_factor:.4f} px/mrad\nCalibrated beam tilt offset: x = {x_offset:.4f}, y = {y_offset:.4f} rad\nThe angle between x and y is {(y_offset - x_offset) * 180 / np.pi:.4f} deg.')
         return (x_factor, x_offset), (y_factor, y_offset)
 
     def correct_beam_tilt_with_shift(self, tilt_strength: float):
@@ -149,7 +153,8 @@ class ta4D:
         # The beam tilt and diffraction shift calibrations need to be done beforehand
         HT = self.metadata.get('HT', 'default')
         CL = self.metadata.get('Camera length', 'default')
-        calibration = self.calibration.get(HT, {}).get(CL, {})
+        probe_mode = self.metadata.get('Probe mode', 'default')
+        calibration = self.calibration.get(HT, {}).get(probe_mode, {}).get(CL, {})
         if 'Beam tilt' not in calibration or 'Diffraction shift' not in calibration:
             raise ValueError('Beam tilt and diffraction shift must be calibrated beforehand!')
         tilt_factor_offset = calibration['Beam tilt']
