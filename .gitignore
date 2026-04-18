@@ -1,3 +1,6 @@
 data/
 *.raw
 *.tif
+.vscode/settings.json
+.gitignore
+.ipynb_checkpoints/

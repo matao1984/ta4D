@@ -138,7 +138,7 @@ class ta4D_datasets:
         if i + 1 < n_rows * n_cols:
             for j in range(i+1, n_rows*n_cols):
                 axes.flat[j].axis('off')
-        plt.tight_layout()
+        fig.tight_layout()
         plt.show()
 
     def get_mean_dp(self, dataset) -> np.ndarray:
