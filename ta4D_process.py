@@ -13,6 +13,7 @@ import matplotlib.colors as colors
 from matplotlib.widgets import Slider
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from functools import partial
+from joblib import Parallel, delayed
 import os
 
 def fourier_upsample_4d(arr: np.ndarray, upsampling: int, worker: int | None = None) -> np.ndarray:
@@ -35,6 +36,47 @@ def fourier_upsample_4d(arr: np.ndarray, upsampling: int, worker: int | None = N
     upsampled *= upsampling ** 2  # Scale the result
 
     return np.real(upsampled)
+
+def ewpc2D(data: np.ndarray, useWindow: bool = True, minlog: float = 0.1) -> np.ndarray:
+        '''
+        Calculates the EWPC transform--fft(log(data))--for 2d data
+            For the theoretical background, check Padgett et al., Ultramicroscopy 2020
+            (https://doi.org/10.1016/j.ultramic.2020.112994).
+            
+        :Parameters:
+            data : 2D array
+                2d diffraction data, ordered (ky, kx). If nonsquare, data will be padded to square with zeros.
+            useWindow : a boolean
+                'True' applies a hanning window before the FFT. The window may 
+                prevent FFT artifacts caused by non-periodic boundaries.
+            minlog : float, optional
+                A small constant added to the data before taking the log to prevent
+                log(0) or log of negative numbers. Default is 0.1.
+
+        :Return: 
+            cep : 2D array
+                ceptral transformed data
+        '''
+        # Pad the data to a square shape if it's not already square
+        data_shape = 0, data.shape[0], 0, data.shape[1]
+        if data.shape[0] != data.shape[1]:                
+            max_dim = max(data.shape)
+            min_dim = min(data.shape)
+            pad_width = int((max_dim - min_dim) / 2)
+            padded_data = np.zeros((max_dim, max_dim))
+            if data.shape[0] < data.shape[1]:  # Pad height
+                data_shape = pad_width, pad_width+data.shape[0], 0, data.shape[1]
+            else:  # Pad width
+                data_shape = 0, data.shape[0], pad_width, pad_width+data.shape[1]
+            padded_data[data_shape[0]:data_shape[1], data_shape[2]:data_shape[3]] = data
+            data = padded_data
+
+        logdp = np.log(data - np.min(data) + minlog) #shifts the data to positive values for the log
+        if useWindow:
+            win = window('hann', data.shape)
+            logdp *= win
+        cep = np.abs(np.fft.fftshift(np.fft.fft2(logdp)))
+        return cep[data_shape[0]:data_shape[1], data_shape[2]:data_shape[3]]  # Crop back to original shape if padded
 
 
 class ta4D_datasets:
@@ -102,6 +144,19 @@ class ta4D_datasets:
         virtual_image = np.sum(data * virtual_mask, axis=(2, 3))
 
         return virtual_image
+    
+    def get_virtual_images_parallel(self, max_workers: int = None, type: str = 'brightfield', center: tuple | None = None, radius: int | None = None) -> list[np.ndarray]:
+        '''Get virtual images from all ta4D datasets in parallel for real-space alignment.
+        Uses ThreadPoolExecutor instead of ProcessPoolExecutor for better performance with numpy operations.'''
+        self.virtual_images = self.run_parallel(
+            func=self.get_virtual_image_single,
+            iterable=self.datasets,
+            max_workers=max_workers,
+            tqdm_desc="Generating virtual images",
+            type=type,
+            center=center,
+            radius=radius,
+        )
 
 
 
@@ -598,39 +653,6 @@ class ta4D_datasets:
             results = list(tqdm(executor.map(func_with_kwargs, iterable), total=len(iterable), desc=tqdm_desc))
         return results
     
-    def get_virtual_images_parallel(self, max_workers: int = None, type: str = 'brightfield', center: tuple | None = None, radius: int | None = None) -> list[np.ndarray]:
-        '''Get virtual images from all ta4D datasets in parallel for real-space alignment.
-        Uses ThreadPoolExecutor instead of ProcessPoolExecutor for better performance with numpy operations.'''
-        self.virtual_images = self.run_parallel(
-            func=self.get_virtual_image_single,
-            iterable=self.datasets,
-            max_workers=max_workers,
-            tqdm_desc="Generating virtual images",
-            type=type,
-            center=center,
-            radius=radius,
-        )
-
-    def align_dps_parallel(self, dp_origins: list, max_workers: int = None) -> np.ndarray:
-        '''Align all diffraction patterns in all scans in parallel.
-        Uses ProcessPoolExecutor for CPU-bound work with numpy operations.'''
-        if max_workers is None:
-            max_workers = min(self.N_scans, os.cpu_count() or 1)
-        
-        # Prepare data tuples
-        data_tuples = [(self.datasets_cropped[i], dp_origins[i], i+1) for i in range(self.N_scans)]
-        
-        self.aligned_datasets = np.zeros(self.datasets_cropped[0].shape, dtype=self.datasets_cropped[0].dtype)
-        with ProcessPoolExecutor(max_workers=max_workers) as executor:
-            futures = [executor.submit(self.align_dps_single_scan, 
-                                     (data_tuples[i][0], data_tuples[i][1]), 
-                                     tqdm_desc=f"Aligning scan {data_tuples[i][2]}")
-                      for i in range(len(data_tuples))]
-            
-            for future in tqdm(as_completed(futures), total=len(futures), desc="Aligning diffraction patterns"):
-                self.aligned_datasets += future.result()
-
-        return self.aligned_datasets
     
     def align_dps_numba(self, dp_origins: list, upsampling: int = 1) -> np.ndarray:
         '''Align all diffraction patterns in all scans using numba for acceleration.
@@ -661,7 +683,7 @@ class ta4D_datasets:
                         type: str = 'brightfield', center: tuple | None = None, radius: int | None = None, 
                         sub_region: tuple | None = None, apply_hann_window: bool =False,
                         refine_radius: int = 5, threshold: float = 1.5, fit_plane: bool = True, upsampling: int = 1,
-                        use_numba: bool = False, **kwargs) -> np.ndarray:
+                        use_numba: bool = True, **kwargs) -> np.ndarray:
         '''High-level function to align all diffraction patterns in all scans.
         First get the dp origins using get_dp_origins, then align using the origins.
         center: Tuple of (x, y) coordinates for virtual images and initial center guess. If None, will use the center of the image array.
@@ -702,83 +724,48 @@ class ta4D_datasets:
         return self.aligned_datasets
     
     #========================== EWPC functions ==========================#
+    
     @staticmethod
-    def ewpc2D(data: np.ndarray, useWindow: bool = True, minlog: float = 0.1) -> np.ndarray:
+    def convert_dp_to_ewpc(dp: np.ndarray, useWindow: bool = True, minlog: float = 0.1, n_workers: int = -1):
         '''
-        Calculates the EWPC transform--fft(log(data))--for 2d data
-            For the theoretical background, check Padgett et al., Ultramicroscopy 2020
-            (https://doi.org/10.1016/j.ultramic.2020.112994).
-            
+        Applies cepstral transform to the data in parallel.
+
         :Parameters:
-            data : 2D array
-                2d diffraction data, ordered (ky, kx). If nonsquare, data will be padded to square with zeros.
-            useWindow : a boolean
-                'True' applies a hanning window before the FFT. The window may 
-                prevent FFT artifacts caused by non-periodic boundaries.
-            minlog : float, optional
-                A small constant added to the data before taking the log to prevent
-                log(0) or log of negative numbers. Default is 0.1.
-
-        :Return: 
-            cep : 2D array
-                ceptral transformed data
-        '''
-        # Pad the data to a square shape if it's not already square
-        data_shape = 0, data.shape[0], 0, data.shape[1]
-        if data.shape[0] != data.shape[1]:                
-            max_dim = max(data.shape)
-            min_dim = min(data.shape)
-            pad_width = int((max_dim - min_dim) / 2)
-            padded_data = np.zeros((max_dim, max_dim))
-            if data.shape[0] < data.shape[1]:  # Pad height
-                data_shape = pad_width, pad_width+data.shape[0], 0, data.shape[1]
-            else:  # Pad width
-                data_shape = 0, data.shape[0], pad_width, pad_width+data.shape[1]
-            padded_data[data_shape[0]:data_shape[1], data_shape[2]:data_shape[3]] = data
-            data = padded_data
-
-        logdp = np.log(data - np.min(data) + minlog) #shifts the data to positive values for the log
-        if useWindow:
-            win = window('hann', data.shape)
-            logdp *= win
-        cep = np.abs(np.fft.fftshift(np.fft.fft2(logdp)))
-        return cep[data_shape[0]:data_shape[1], data_shape[2]:data_shape[3]]  # Crop back to original shape if padded
-
-    @staticmethod
-    @njit(parallel=True, cache=True)
-    def convert_dp_to_ewpc(dp: np.ndarray, useWindow: bool = True, minlog: float = 0.1):
-        '''
-        Applies cepstral transform to the data. 
-
-        :Parameters: 
             dp : ndarray of shape (y, x, ky, kx)
                 4D-STEM dataset.
             useWindow : bool
                 Whether to apply a Hann window before FFT.
             minlog : float
                 Small offset used in log transform to avoid log(0).
+            n_workers: int
+                Number of workers for the paralell computing. -1 to use all the CPUs.
 
-        :Return: 
+        :Return:
             cep : ndarray
                 Cepstral transformed 4D dataset.
         '''
         cep = np.zeros(dp.shape, dtype=np.float32)
-        for i in prange(dp.shape[0]):
-            for j in prange(dp.shape[1]):
-                with objmode(cep_ij='float32[:,:]'):
-                    cep_ij = ta4D_datasets.ewpc2D(dp[i,j,:,:], useWindow=useWindow, minlog=minlog)
-                cep[i,j] = cep_ij
+        total_points = dp.shape[0] * dp.shape[1]
+        scan_indices = list(np.ndindex(dp.shape[:2]))
+
+        results = Parallel(n_jobs=n_workers)(
+            delayed(ewpc2D)(dp[j, k], useWindow, minlog)
+            for j, k in tqdm(scan_indices, total=total_points, desc="Converting to EWPC")
+        )
+        for (j, k), cep_jk in zip(scan_indices, results):
+            cep[j, k] = cep_jk
         return cep
-    
-    def sum_dps_ewpc(self, *args, **kwargs) -> np.ndarray:
+
+    def sum_dps_ewpc(self, interval=1, *args, **kwargs) -> np.ndarray:
         '''Convert all diffraction patterns in all scans to EWPC and sum them. Useful for strain mapping with EWPC.
+        interval: int, the summing interval. If >1, will sum every 'interval' scans. For debug.
         *args, **kwargs: Additional parameters to pass to convert_dp_to_ewpc for the EWPC transform.
         Returns:
         sum_ewpc: 4D numpy array of the summed EWPC-transformed data.
         '''
         assert hasattr(self, 'datasets_cropped'), "datasets_cropped not found. Please run align_scan_positions() first."
         self.sum_ewpc = np.zeros(self.datasets_cropped[0].shape, dtype=self.datasets_cropped[0].dtype)
-        for i in tqdm(range(self.N_scans), desc="Computing EWPC sum"):
+        for i in tqdm(range(0, self.N_scans, interval), desc="Computing EWPC sum"):
             dataset = np.ascontiguousarray(self.datasets_cropped[i])
             cep = self.convert_dp_to_ewpc(dataset, *args, **kwargs)
             self.sum_ewpc += cep
